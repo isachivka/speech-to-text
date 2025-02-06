@@ -1,73 +1,102 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 
 export async function POST(request: NextRequest) {
-  const formData = await request.formData();
-  const file = formData.get('file') as File;
-
-  if (!file) {
-    return NextResponse.json({ error: 'No file uploaded' }, { status: 400 });
-  }
-
   const tempDir = path.join('/tmp', uuidv4());
-  await fs.mkdir(tempDir, { recursive: true });
+  let dirCreated = false;
 
-  const filePath = path.join(tempDir, file.name);
-  const fileBuffer = Buffer.from(await file.arrayBuffer());
-  await fs.writeFile(filePath, fileBuffer);
+  try {
+    await fs.mkdir(tempDir, { recursive: true });
+    dirCreated = true;
 
-  const fileExtension = path.extname(file.name).toLowerCase();
-  let wavFilePath = filePath;
+    const formData = await request.formData();
+    const file = formData.get('file') as File;
+    if (!file) {
+      return NextResponse.json({ error: 'No file uploaded' }, { status: 400 });
+    }
 
-  if (fileExtension !== '.wav') {
-    const convertedWavFilePath = path.join(tempDir, `${path.basename(file.name, fileExtension)}.wav`);
-    await execPromise(`ffmpeg -i "${filePath}" "${convertedWavFilePath}"`);
-    wavFilePath = convertedWavFilePath;
-  }
+    const originalFilePath = path.join(tempDir, file.name);
+    const fileBuffer = Buffer.from(await file.arrayBuffer());
+    await fs.writeFile(originalFilePath, fileBuffer);
 
-  const wav16kFilePath = path.join(tempDir, `${path.basename(wavFilePath, '.wav')}_16k.wav`);
-  await execPromise(`ffmpeg -i "${wavFilePath}" -ar 16000 "${wav16kFilePath}"`);
+    const fileExtension = path.extname(file.name).toLowerCase();
+    let wavFilePath = originalFilePath;
+    if (fileExtension !== '.wav') {
+      wavFilePath = path.join(tempDir, `${path.basename(file.name, fileExtension)}.wav`);
+      await execPromise(`ffmpeg -i "${originalFilePath}" "${wavFilePath}"`);
+    }
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      try {
-        const whisperProcess = exec(`cd ~/other/voice-recog/ && ./build/bin/whisper-cli -m models/ggml-medium.bin -f "${wav16kFilePath}" -l ru`);
+    // Audio preprocessing:
+    // - convert to mono (-ac 1)
+    // - change sample rate to 16kHz (-ar 16000)
+    // - noise reduction (afftdn)
+    // - frequency filtering (highpass and lowpass)
+    // - volume normalization (loudnorm)
+    // - silence trimming (silenceremove)
+    const preprocessedWavFilePath = path.join(tempDir, `${path.basename(wavFilePath, '.wav')}_preprocessed.wav`);
+    const filterChain = 'afftdn,highpass=f=200,lowpass=f=3000,loudnorm,silenceremove=1:0:-50dB';
+    await execPromise(`ffmpeg -i "${wavFilePath}" -ac 1 -ar 16000 -af "${filterChain}" "${preprocessedWavFilePath}"`);
 
-        whisperProcess.stdout?.on('data', (data) => {
-          const lines = data.toString().split('\n');
-          lines.forEach((line: string) => {
-            const match = line.match(/^\[\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}\] (.+)$/);
-            if (match) {
-              controller.enqueue(line + '\n');
-            }
+    const stream = new ReadableStream({
+      async start(controller) {
+        try {
+          const whisperCmd = `cd ~/other/voice-recog/ && ./build/bin/whisper-cli -m models/ggml-medium.bin -f "${preprocessedWavFilePath}" -l ru`;
+          const whisperProcess = spawn('bash', ['-c', whisperCmd]);
+
+          whisperProcess.stdout.on('data', (data: Buffer) => {
+            const lines = data.toString().split('\n');
+            lines.forEach((line: string) => {
+              const match = line.match(/^\[\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}\] (.+)$/);
+              if (match) {
+                controller.enqueue(line + '\n');
+              }
+            });
           });
-        });
 
-        whisperProcess.stderr?.on('data', (data) => {
-          console.error(data.toString());
-          // controller.enqueue(data);
-        });
+          whisperProcess.stderr.on('data', (data: Buffer) => {
+            console.error('Whisper stderr:', data.toString());
+          });
 
-        whisperProcess.on('close', async () => {
-          await fs.rm(tempDir, { recursive: true, force: true });
-          controller.close();
-        });
-      } catch (error) {
-        controller.error(error);
+          whisperProcess.on('error', (error) => {
+            controller.error(error);
+          });
+
+          whisperProcess.on('close', async () => {
+            try {
+              await fs.rm(tempDir, { recursive: true, force: true });
+            } catch (err) {
+              console.error('Error cleaning tempDir:', err);
+            }
+            controller.close();
+          });
+        } catch (error) {
+          controller.error(error);
+        }
+      }
+    });
+
+    return new NextResponse(stream);
+  } catch (error) {
+    console.error('Error processing request:', error);
+    if (dirCreated) {
+      try {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      } catch (err) {
+        console.error('Error cleaning tempDir after error:', err);
       }
     }
-  });
-
-  return new NextResponse(stream);
+    return NextResponse.json({ error: error || 'Internal server error' }, { status: 500 });
+  }
 }
 
 function execPromise(command: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    exec(command, (error) => {
+    exec(command, (error, stdout, stderr) => {
       if (error) {
+        console.error(`Error executing command "${command}":`, stderr);
         reject(error);
       } else {
         resolve();
