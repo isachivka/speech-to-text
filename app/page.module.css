@@ -166,3 +166,31 @@ a.secondary {
     filter: invert();
   }
 }
+
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.resultItem {
+  border: 1px solid var(--gray-alpha-200);
+  border-radius: 8px;
+  padding: 16px;
+  background: var(--gray-alpha-100);
+}
+
+.resultTitle {
+  font-weight: bold;
+  cursor: pointer;
+}
+
+.resultText {
+  margin-top: 8px;
+}
+
+.loading {
+  margin-top: 8px;
+  color: var(--button-primary-hover);
+  font-style: italic;
+}
