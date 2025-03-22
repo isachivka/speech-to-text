@@ -43,7 +43,7 @@ export async function POST(request: NextRequest) {
     const stream = new ReadableStream({
       async start(controller) {
         try {
-          const whisperCmd = `cd ~/other/voice-recog/ && ./build/bin/whisper-cli -m models/ggml-medium.bin -f "${preprocessedWavFilePath}" -l ru`;
+          const whisperCmd = `cd ~/other/voice-recog/ && ./build/bin/whisper-cli -m models/ggml-medium.bin -t 12 -f "${preprocessedWavFilePath}" -l ru`;
           const whisperProcess = spawn('bash', ['-c', whisperCmd]);
 
           whisperProcess.stdout.on('data', (data: Buffer) => {
